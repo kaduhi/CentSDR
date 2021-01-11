@@ -286,6 +286,12 @@ save_config_current_channel(void)
 
 // code from official release QCX-SSB-R1.02j https://github.com/threeme3/QCX-SSB/archive/R1.02j.zip
 
+//  QCX-SSB.ino - https://github.com/threeme3/QCX-SSB
+//
+//  Copyright 2019, 2020   Guido PE1NNZ <pe1nnz@amsat.org>
+//
+//  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions: The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 #ifdef PORT_uSDX_TO_CentSDR
 enum mode_t { USDX_LSB, USDX_USB, USDX_CW, USDX_AM, USDX_FM };
 volatile int8_t mode = USDX_LSB;
@@ -419,6 +425,12 @@ void build_lut()
 #elif USE_FEATURE_RX_IMPROVED_BRANCH
 
 // code from QCX-SSB/feature-rx-improved branch @ f0cc3d8f4af16aeeb94ba6293065a4c3aa290e3a
+
+//  QCX-SSB.ino - https://github.com/threeme3/QCX-SSB
+//
+//  Copyright 2019, 2020   Guido PE1NNZ <pe1nnz@amsat.org>
+//
+//  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions: The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #ifdef PORT_uSDX_TO_CentSDR
 enum mode_t { USDX_LSB, USDX_USB, USDX_CW, USDX_FM, USDX_AM };
