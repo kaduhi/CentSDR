@@ -117,6 +117,78 @@ void si5351_setupPLL(uint8_t pll, /* SI5351_PLL_A or SI5351_PLL_B */
   si5351_bulk_write(reg, 9);
 }
 
+#ifdef PORT_uSDX_TO_CentSDR
+
+static inline void
+i2cSendByte(I2C_TypeDef* i2c, uint8_t addr, const uint8_t *buf, uint8_t len)
+{
+	i2c->CR2 = (I2C_CR2_SADD & addr) 	// Set the slave address
+      | (I2C_CR2_NBYTES & (len << 16))	// Send one byte
+      | I2C_CR2_START 					// Generate start condition
+      | I2C_CR2_AUTOEND;				// Generate stop condition after sent
+
+	// Send the data
+    while (len-- > 0) {
+      while (!(i2c->ISR & I2C_ISR_TXIS));
+      i2c->TXDR = (I2C_TXDR_TXDATA & *buf++);
+    }
+}
+
+static inline void
+si5351_bulk_write_fast(const uint8_t *buf, int len)
+{
+  i2cSendByte(I2C1, SI5351_I2C_ADDR, buf, len);
+}
+
+static void si5351_setupPLL_fast(
+  uint8_t     mult,
+  uint32_t    num,
+  uint32_t    denom)
+{
+  uint32_t P1;
+  uint32_t P2;
+
+  /* Feedback Multisynth Divider Equation
+   * where: a = mult, b = num and c = denom
+   * P1 register is an 18-bit value using following formula:
+   * 	P1[17:0] = 128 * mult + floor(128*(num/denom)) - 512
+   * P2 register is a 20-bit value using the following formula:
+   * 	P2[19:0] = 128 * num - denom * floor(128*(num/denom))
+   * P3 register is a 20-bit value using the following formula:
+   * 	P3[19:0] = denom
+   */
+
+  /* Set the main PLL config registers */
+  /* Fractional mode */
+  //P1 = (uint32_t)(128 * mult + floor(128 * ((float)num/(float)denom)) - 512);
+  P1 = (128 * num) / denom;
+  //P2 = (uint32_t)(128 * num - denom * floor(128 * ((float)num/(float)denom)));
+  P2 = 128 * num - denom * ((128 * num) / denom);
+
+  /* The datasheet is a nightmare of typos and inconsistencies here! */
+  // uint8_t reg[9];
+  // reg[0] = SI5351_REG_34_PLL_B;
+  // reg[1] = (P3 & 0x0000FF00) >> 8;
+  // reg[2] = (P3 & 0x000000FF);
+  // reg[3] = (P1 & 0x00030000) >> 16;
+  // reg[4] = (P1 & 0x0000FF00) >> 8;
+  // reg[5] = (P1 & 0x000000FF);
+  // reg[6] = ((P3 & 0x000F0000) >> 12) | ((P2 & 0x000F0000) >> 16);
+  // reg[7] = (P2 & 0x0000FF00) >> 8;
+  // reg[8] = (P2 & 0x000000FF);
+
+  uint8_t reg[5];
+  reg[0] = SI5351_REG_34_PLL_B + 4;
+  reg[1] = P1;
+  reg[2] = ((denom & 0x000F0000) >> 12) | ((P2 & 0x000F0000) >> 16);
+  reg[3] = (P2 & 0x0000FF00) >> 8;
+  reg[4] = (P2 & 0x000000FF);
+
+  si5351_bulk_write_fast(reg, 5);
+}
+
+#endif
+
 static const uint8_t msreg_base[] = {
   SI5351_REG_42_MULTISYNTH0,
   SI5351_REG_50_MULTISYNTH1,
@@ -408,6 +480,26 @@ si5351_set_frequency_quadrature(int pll, int freq,
 
     uint32_t pll_freq = freq * s_prev_ms_div;
     uint32_t ms_div;
+
+#ifdef PORT_uSDX_TO_CentSDR
+    static bool s_fast_set_mode = false;
+    if (rdiv == SI5351_R_DIV_1 && 7000000 <= freq && freq < 7250000) {
+      ms_div = 104;   // (XTALFREQ(26MHz) * 4)
+
+      if (s_fast_set_mode) {
+        uint32_t pll_mult = 28;
+        uint32_t pll_num = freq - 7000000;
+        uint32_t pll_denom = 250000;
+        si5351_setupPLL_fast(pll_mult, pll_num, pll_denom);
+        return;
+      }
+
+      s_fast_set_mode = true;
+    }
+    else {
+      s_fast_set_mode = false;
+#endif
+
     if (pll_freq <= PLL_MAX_FREQ &&
         (pll_freq >= PLL_MIN_FREQ ||
          (s_prev_ms_div == MULTISYNTH_PHOFF_MAX &&
@@ -433,6 +525,10 @@ si5351_set_frequency_quadrature(int pll, int freq,
     if (ms_div < MULTISYNTH_DIV_MIN) {
       ms_div = MULTISYNTH_DIV_MIN;
     }
+
+#ifdef PORT_uSDX_TO_CentSDR
+    }
+#endif
 
     pll_freq = freq * ms_div;
 

@@ -18,6 +18,9 @@
  * Boston, MA 02110-1301, USA.
  */
 
+#ifndef _NANOSDR_H_
+#define _NANOSDR_H_
+
 /*
   If you want to generate the quadrature LO directly from Si5351A without U2 (74LVC74APW),
   enable the below SI5351_GEN_QUADRATURE_LO macro switch.
@@ -28,6 +31,7 @@
 //#define SI5351_GEN_QUADRATURE_LO      1
 
 #ifdef SI5351_GEN_QUADRATURE_LO
+
 /*
   To support the quadrature LO down to 100kHz, enable the below SI5351_GEN_QUADRATURE_LO_BELOW_3500KHZ macro switch,
   then modify the hardware:
@@ -47,7 +51,27 @@
     tell the quadrature LO has correct phase or not, if no other strong signal is blocking the CLK2 signal.
  */
 //#define SI5351_GEN_QUADRATURE_LO_BELOW_3500KHZ      1
+
+/*
+  If you want to try the SSB TX portion of the uSDX (https://groups.io/g/ucx) (originally QCX-SSB https://github.com/threeme3/QCX-SSB)
+  on CentSDR, enable the macro switch below.
+  Current TX implementation only supports 40m band (7.000MHz ~ 7.250MHz).
+  There is no PTT switch, so you need to use the "tx" CLI command to toggle between RX and TX.
+
+  You need to have the uSDX PA circuit (EER Class-E PWM based SSB modulator) and connected to CentSDR:
+  - PWM signal (active low) for Amplitude portion of SSB: S4 (PB0 Pin18 of STM32F303 or T_CS on LCD connector)
+  - PWM signal for RF frequency and Phase portion of SSB: AUXLO thru hole next to the SMA antenna connector
+  Note: above signals are in 3.3V logic level, and uSDX PA requires 5V logic level so please insert some buffer between them.
+  (e.g. use a NAND gate in 74ACT00)
+  Warning: the Amplitude PWM signal is in ACTIVE LOW, so you have to negate the logic before put in the RC low pass filter
+
+  If you just want to hear the Phase portion of the SSB signal, you can connect short wire at the AUXLO thru hole as antenna
+  then listen on 40m LSB (e.g. 7.200MHz) with HF rig.
+ */
+//#define PORT_uSDX_TO_CentSDR          1
+
 #endif
+
 
 /*
  * main.c
@@ -114,6 +138,8 @@ extern void tlv320aic3204_set_adc_fine_gain_adjust(int8_t g1, int8_t g2);
 
 extern void tlv320aic3204_beep(void);
 
+extern void tlv320aic3204_select_in1(void);
+extern void tlv320aic3204_select_in3(void);
 extern uint8_t tlv320aic3204_read_register(uint8_t page, uint8_t reg);
 extern void tlv320aic3204_write_register(uint8_t page, uint8_t reg, uint8_t val);
 
@@ -344,4 +370,5 @@ int config_recall(void);
 
 void clear_all_config_prop_data(void);
 
+#endif /* _NANOSDR_H_ */
 /*EOF*/

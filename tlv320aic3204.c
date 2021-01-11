@@ -137,7 +137,7 @@ static const uint8_t conf_data_routing[] = {
   2, 0x02, 0x01, /* Enable Master Analog Power Control */
   2, 0x7b, 0x01, /* Set the REF charging time to 40ms */
   2, 0x14, 0x25, /* HP soft stepping settings for optimal pop performance at power up Rpop used is 6k with N = 6 and soft step = 20usec. This should work with 47uF coupling capacitor. Can try N=5,6 or 7 time constants as well. Trade-off delay vs “pop” sound. */
-  2, 0x0a, 0x33, /* Set the Input Common Mode to 0.9V and Output Common Mode for Headphone to 1.65V */
+  2, 0x0a, 0x33, /* Reg 10: Set the Input Common Mode to 0.9V and Output Common Mode for Headphone to 1.65V */
   2, 0x0c, 0x08, /* Route Left DAC to HPL */
   2, 0x0d, 0x08, /* Route Right DAC to HPR */
   2, 0x03, 0x00, /* Set the DAC PTM mode to PTM_P3/4 */
@@ -155,19 +155,38 @@ static const uint8_t conf_data_routing[] = {
   2, 0x39, 0x04, /* Route IN3L to RIGHT_N with 10K */
   2, 0x3b, 72, /* Unmute Left MICPGA, Gain selection of 32dB to make channel gain 0dB */
   2, 0x3c, 72, /* Unmute Right MICPGA, Gain selection of 32dB to make channel gain 0dB */
-  2, 0x33, 0x60, /* Enable MIC bias, 2.5V */
+  2, 0x33, 0x68, /* Reg 51: Enable MIC bias, 2.5V, generated from LDOIN */
   2, 0x00, 0x08, /* Select Page 8 */
   2, 0x01, 0x04, /* Enable Adaptive Filter mode */
   0 // sentinel
 };
 
+static const uint8_t conf_data_ch3_select[] = {
+  2, 0x00, 0x01, /* Select Page 1 */
+  2, 0x37, 0x04, /* Route IN3R to RIGHT_P with 10K */
+  2, 0x39, 0x04, /* Route IN3L to RIGHT_N with 10K */
+  2, 0x00, 0x00, /* Select Page 0 */
+  0 // sentinel
+};
+
+static const uint8_t conf_data_ch1_select[] = {
+  2, 0x00, 0x01, /* Select Page 1 */
+  2, 0x37, 0x40, /* Route IN1R to RIGHT_P with input impedance of 10K */
+  2, 0x39, 0x40, /* Route CM1R to RIGHT_N with input impedance of 10K */
+  // 2, 0x37, 0xC0, /* Route IN1R to RIGHT_P with input impedance of 40K */
+  // 2, 0x39, 0xC0, /* Route CM1R to RIGHT_N with input impedance of 40K */
+  2, 0x00, 0x00, /* Select Page 0 */
+  0 // sentinel
+};
+
 const uint8_t conf_data_unmute[] = {
   2, 0x00, 0x00, /* Select Page 0 */
+  2, 0x38, 0x00, /* Reg 56: SCLK pin is disabled, used for Headphone detection */
   2, 0x3f, 0xd6, /* Power up the Left and Right DAC Channels with route the Left Audio digital data to Left Channel DAC and Right Audio digital data to Right Channel DAC */
   2, 0x40, 0x00, /* Unmute the DAC digital volume control */
   2, 0x51, 0xc0, /* Power up Left and Right ADC Channels */
   2, 0x52, 0x00, /* Unmute Left and Right ADC Digital Volume Control */    
-  2, 0x43, 0x93, /* Enable Headphone detection, Debounce 256ms, Button Debounce 32ms */    
+  2, 0x43, 0x93, /* Reg 67: Enable Headphone detection, Debounce 256ms, Button Debounce 32ms */    
   0 // sentinel
 };
 
@@ -192,6 +211,16 @@ void tlv320aic3204_init(void)
 void tlv320aic3204_stop(void)
 {
   tlv320aic3204_config(conf_data_divoff);
+}
+
+void tlv320aic3204_select_in1(void)
+{
+  tlv320aic3204_config(conf_data_ch1_select);
+}
+
+void tlv320aic3204_select_in3(void)
+{
+  tlv320aic3204_config(conf_data_ch3_select);
 }
 
 void tlv320aic3204_set_fs(int fs)
