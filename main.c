@@ -67,6 +67,13 @@ static void cmd_reset(BaseSequentialStream *chp, int argc, char *argv[])
 }
 
 static const I2CConfig i2ccfg = {
+  /*  31:28 PRESC     0000
+      27:24 reserved  0000
+      23:20 SCLDEL    1001
+      19:16 SDADEL    0000
+      15: 8 SCLH      00100000
+       7: 0 SCLL      00100101
+  */
   0x00902025, //voodoo magic
   //0x00420F13,  // 100kHz @ 72MHz
   0,
@@ -102,6 +109,10 @@ static void cmd_tune(BaseSequentialStream *chp, int argc, char *argv[])
 
 int16_t rx_buffer[AUDIO_BUFFER_LEN * 2];
 int16_t tx_buffer[AUDIO_BUFFER_LEN * 2];
+
+#ifdef PORT_uSDX_TO_CentSDR
+int16_t tx_amp_ph[AUDIO_BUFFER_LEN / 10][2];
+#endif
 
 const buffer_ref_t buffers_table[BUFFERS_MAX] = {
   { BT_C_INTERLEAVE, AUDIO_BUFFER_LEN, rx_buffer,  NULL },
@@ -265,6 +276,447 @@ save_config_current_channel(void)
   config_save();
 }
 
+#ifdef PORT_uSDX_TO_CentSDR
+
+#define USE_QCX_SSB_R1_02J                1     // official release QCX-SSB-R1.02j https://github.com/threeme3/QCX-SSB/archive/R1.02j.zip
+#define USE_FEATURE_RX_IMPROVED_BRANCH    0     // QCX-SSB/feature-rx-improved branch @ f0cc3d8f4af16aeeb94ba6293065a4c3aa290e3a
+
+
+#if USE_QCX_SSB_R1_02J
+
+// code from official release QCX-SSB-R1.02j https://github.com/threeme3/QCX-SSB/archive/R1.02j.zip
+
+#ifdef PORT_uSDX_TO_CentSDR
+enum mode_t { USDX_LSB, USDX_USB, USDX_CW, USDX_AM, USDX_FM };
+volatile int8_t mode = USDX_LSB;
+#else
+enum mode_t { LSB, USB, CW, AM, FM };
+volatile int8_t mode = USB;
+#endif
+
+static bool tx = false;
+volatile bool vox = false;
+
+inline void _vox(uint8_t trigger)
+{
+#ifndef PORT_uSDX_TO_CentSDR
+  if(trigger){
+    //if(!tx){ /* TX can be enabled here */ }
+    tx = (vox) ? 255 : 1; // hangtime = 255 / 4402 = 58ms (the time that TX at least stays on when not triggered again)
+  } else {
+    if(tx){
+      tx--;
+      //if(!tx){ /* RX can be enabled here */ }
+    }
+  }
+#endif
+}
+
+//#define F_SAMP_TX 4402
+#ifdef PORT_uSDX_TO_CentSDR
+#define F_SAMP_TX 4800        //4810 // ADC sample-rate; is best a multiple of _UA and fits exactly in OCR0A = ((F_CPU / 64) / F_SAMP_TX) - 1 , should not exceed CPU utilization
+#else
+#define F_SAMP_TX 4810        //4810 // ADC sample-rate; is best a multiple of _UA and fits exactly in OCR0A = ((F_CPU / 64) / F_SAMP_TX) - 1 , should not exceed CPU utilization
+#endif
+#define _UA  (F_SAMP_TX)      //360  // unit angle; integer representation of one full circle turn or 2pi radials or 360 degrees, should be a integer divider of F_SAMP_TX and maximized to have higest precision
+//#define MAX_DP  (_UA/1)  //(_UA/2) // the occupied SSB bandwidth can be further reduced by restricting the maximum phase change (set MAX_DP to _UA/2).
+//#define CONSTANT_AMP  1 // enable this in case there is no circuitry for controlling envelope (key shaping circuit)
+//#define CARRIER_COMPLETELY_OFF_ON_LOW  1    // disable oscillator on no-envelope transitions, to prevent potential unwanted biasing/leakage through PA circuit
+#define MULTI_ADC  1  // multiple ADC conversions for more sensitive (+12dB) microphone input
+
+inline int16_t arctan3(int16_t q, int16_t i)  // error ~ 0.8 degree
+{ // source: [1] http://www-labs.iro.umontreal.ca/~mignotte/IFT2425/Documents/EfficientApproximationArctgFunction.pdf
+#define _atan2(z)  (_UA/8 - _UA/22 * z + _UA/22) * z  //derived from (5) [1]
+  //#define _atan2(z)  (_UA/8 - _UA/24 * z + _UA/24) * z  //derived from (7) [1]
+  int16_t r;
+  if(abs(q) > abs(i))
+    r = _UA / 4 - _atan2(abs(i) / abs(q));        // arctan(z) = 90-arctan(1/z)
+  else
+    r = (i == 0) ? 0 : _atan2(abs(q) / abs(i));   // arctan(z)
+  r = (i < 0) ? _UA / 2 - r : r;                  // arctan(-z) = -arctan(z)
+  return (q < 0) ? -r : r;                        // arctan(-z) = -arctan(z)
+}
+
+#define magn(i, q) (abs(i) > abs(q) ? abs(i) + abs(q) / 4 : abs(q) + abs(i) / 4) // approximation of: magnitude = sqrt(i*i + q*q); error 0.95dB
+
+uint8_t lut[256];
+volatile uint8_t amp;
+volatile uint8_t vox_thresh = (1 << 2);
+volatile uint8_t drive = 2;   // hmm.. drive>2 impacts cpu load..why?
+
+inline int16_t ssb(int16_t in)
+{
+  static int16_t dc;
+
+  int16_t i, q;
+  uint8_t j;
+  static int16_t v[16];
+
+  for(j = 0; j != 15; j++) v[j] = v[j + 1];
+
+  dc += (in - dc) / 2;
+#ifdef PORT_uSDX_TO_CentSDR
+  v[15] = in;          // no DC decoupling
+#else
+  v[15] = in - dc;     // DC decoupling
+#endif
+  //dc = in;  // this is actually creating a high-pass (emphasis) filter
+
+  i = v[7];
+  q = ((v[0] - v[14]) * 2 + (v[2] - v[12]) * 8 + (v[4] - v[10]) * 21 + (v[6] - v[8]) * 15) / 128 + (v[6] - v[8]) / 2; // Hilbert transform, 40dB side-band rejection in 400..1900Hz (@4kSPS) when used in image-rejection scenario; (Hilbert transform require 5 additional bits)
+
+  uint16_t _amp = magn(i, q);
+  if(vox) _vox(_amp > vox_thresh);
+  //_amp = (_amp > vox_thresh) ? _amp : 0;   // vox_thresh = 1 is a good setting
+
+  _amp = _amp << (drive);
+#ifdef CONSTANT_AMP
+  if(_amp < 4 ){ amp = 0; return 0; } //hack: for constant amplitude cases, set drive=1 for good results
+  //digitalWrite(RX, (_amp < 4)); // fast on-off switching for constant amplitude case
+#endif
+  _amp = ((_amp > 255) || (drive == 8)) ? 255 : _amp; // clip or when drive=8 use max output
+  amp = (tx) ? lut[_amp] : 0;
+
+  static int16_t prev_phase;
+  int16_t phase = arctan3(q, i);
+
+  int16_t dp = phase - prev_phase;  // phase difference and restriction
+  //dp = (amp) ? dp : 0;  // dp = 0 when amp = 0
+  prev_phase = phase;
+
+  if(dp < 0) dp = dp + _UA; // make negative phase shifts positive: prevents negative frequencies and will reduce spurs on other sideband
+#ifdef MAX_DP
+  if(dp > MAX_DP){ // dp should be less than half unit-angle in order to keep frequencies below F_SAMP_TX/2
+    prev_phase = phase - (dp - MAX_DP);  // substract restdp
+    dp = MAX_DP;
+  }
+#endif
+#ifdef PORT_uSDX_TO_CentSDR
+  if(mode == USDX_USB)
+#else
+  if(mode == USB)
+#endif
+    return dp * ( F_SAMP_TX / _UA); // calculate frequency-difference based on phase-difference
+  else
+    return dp * (-F_SAMP_TX / _UA);
+}
+
+#ifdef PORT_uSDX_TO_CentSDR
+static uint8_t pwm_min = 110;    // PWM value for which PA reaches its minimum: 29 when C31 installed;   0 when C31 removed;   0 for biasing BS170 directly
+static uint8_t pwm_max = 175;  // PWM value for which PA reaches its maximum: 96 when C31 installed; 255 when C31 removed; 220 for biasing BS170 directly
+#else
+static uint8_t pwm_min = 0;    // PWM value for which PA reaches its minimum: 29 when C31 installed;   0 when C31 removed;   0 for biasing BS170 directly
+static uint8_t pwm_max = 220;  // PWM value for which PA reaches its maximum: 96 when C31 installed; 255 when C31 removed; 220 for biasing BS170 directly
+#endif
+
+void build_lut()
+{
+  // this code is from setup()
+  for(uint16_t i = 0; i != 256; i++)    // refresh LUT based on pwm_min, pwm_max
+    lut[i] = (float)i / ((float)255 / ((float)pwm_max - (float)pwm_min)) + pwm_min;
+}
+
+#elif USE_FEATURE_RX_IMPROVED_BRANCH
+
+// code from QCX-SSB/feature-rx-improved branch @ f0cc3d8f4af16aeeb94ba6293065a4c3aa290e3a
+
+#ifdef PORT_uSDX_TO_CentSDR
+enum mode_t { USDX_LSB, USDX_USB, USDX_CW, USDX_FM, USDX_AM };
+volatile uint8_t mode = USDX_LSB;
+#else
+enum mode_t { LSB, USB, CW, FM, AM };
+volatile uint8_t mode = USB;
+#endif
+
+static bool tx = false;
+volatile uint8_t vox = 0;
+
+inline void _vox(uint8_t trigger)
+{
+#ifndef PORT_uSDX_TO_CentSDR
+  if(trigger){
+    tx = (tx) ? 254 : 255; // hangtime = 255 / 4402 = 58ms (the time that TX at least stays on when not triggered again). tx == 255 when triggered first, 254 follows for subsequent triggers, until tx is off.
+  } else {
+    if(tx) tx--;
+  }
+#endif
+}
+
+//#define F_SAMP_TX 4402
+#ifdef PORT_uSDX_TO_CentSDR
+#define F_SAMP_TX 4800        //4810 // ADC sample-rate; is best a multiple of _UA and fits exactly in OCR2A = ((F_CPU / 64) / F_SAMP_TX) - 1 , should not exceed CPU utilization
+#else
+#define F_SAMP_TX 4810        //4810 // ADC sample-rate; is best a multiple of _UA and fits exactly in OCR2A = ((F_CPU / 64) / F_SAMP_TX) - 1 , should not exceed CPU utilization
+#endif
+//#define MAX_DP  (_UA/4)  //(_UA/2) // the occupied SSB bandwidth can be further reduced by restricting the maximum phase change (set MAX_DP to _UA/2).
+#define _UA  (F_SAMP_TX)      //360  // unit angle; integer representation of one full circle turn or 2pi radials or 360 degrees, should be a integer divider of F_SAMP_TX and maximized to have higest precision
+#define CARRIER_COMPLETELY_OFF_ON_LOW  1    // disable oscillator on low amplitudes, to prevent potential unwanted biasing/leakage through PA circuit
+#define MULTI_ADC  1  // multiple ADC conversions for more sensitive (+12dB) microphone input
+//#define TX_CLK0_CLK1  1   // use CLK0, CLK1 for TX (instead of CLK2), you may enable and use NTX pin for enabling the TX path (this is like RX pin, except that RX may also be used as attenuator)
+//#define QUAD  1       // invert TX signal for phase changes > 180
+
+inline int16_t arctan3(int16_t q, int16_t i)  // error ~ 0.8 degree
+{ // source: [1] http://www-labs.iro.umontreal.ca/~mignotte/IFT2425/Documents/EfficientApproximationArctgFunction.pdf
+//#define _atan2(z)  (_UA/8  + _UA/22) * z  // very much of a simplification...not accurate at all, but fast
+#define _atan2(z)  (_UA/8 - _UA/22 * z + _UA/22) * z  //derived from (5) [1]
+  //#define _atan2(z)  (_UA/8 - _UA/24 * z + _UA/24) * z  //derived from (7) [1]
+  int16_t r;
+  if(abs(q) > abs(i))
+    r = _UA / 4 - _atan2(abs(i) / abs(q));        // arctan(z) = 90-arctan(1/z)
+  else
+    r = (i == 0) ? 0 : _atan2(abs(q) / abs(i));   // arctan(z)
+  r = (i < 0) ? _UA / 2 - r : r;                  // arctan(-z) = -arctan(z)
+  return (q < 0) ? -r : r;                        // arctan(-z) = -arctan(z)
+}
+
+#define magn(i, q) (abs(i) > abs(q) ? abs(i) + abs(q) / 4 : abs(q) + abs(i) / 4) // approximation of: magnitude = sqrt(i*i + q*q); error 0.95dB
+
+uint8_t lut[256];
+volatile uint8_t amp;
+volatile uint8_t vox_thresh = (1 << 0); //(1 << 2);
+volatile uint8_t drive = 2;   // hmm.. drive>2 impacts cpu load..why?
+
+volatile uint8_t quad = 0;
+
+inline int16_t ssb(int16_t in)
+{
+  static int16_t dc, z1;
+
+  int16_t i, q;
+  uint8_t j;
+  static int16_t v[16];
+
+  for(j = 0; j != 15; j++) v[j] = v[j + 1];
+
+  //dc += (in - dc) / 2;       // fast moving average
+  dc = (in + dc) / 2;        // average
+#ifdef PORT_uSDX_TO_CentSDR
+  int16_t ac = (in - dc);    // DC decoupling
+#else
+  uint16_t ac = (in - dc);   // DC decoupling
+#endif
+#ifdef PORT_uSDX_TO_CentSDRCENTSDR
+  v[15] = in;                // without DC decoupling
+#else
+  v[15] = ac;// - z1;        // high-pass (emphasis) filter
+  //z1 = ac;
+#endif
+
+  i = v[7];
+  q = ((v[0] - v[14]) * 2 + (v[2] - v[12]) * 8 + (v[4] - v[10]) * 21 + (v[6] - v[8]) * 15) / 128 + (v[6] - v[8]) / 2; // Hilbert transform, 40dB side-band rejection in 400..1900Hz (@4kSPS) when used in image-rejection scenario; (Hilbert transform require 5 additional bits)
+
+  uint16_t _amp = magn(i, q);
+#ifdef CARRIER_COMPLETELY_OFF_ON_LOW
+  _vox(_amp > vox_thresh);
+#else
+  if(vox) _vox(_amp > vox_thresh);
+#endif
+  //_amp = (_amp > vox_thresh) ? _amp : 0;   // vox_thresh = 4 is a good setting
+  //if(!(_amp > vox_thresh)) return 0;
+
+  _amp = _amp << (drive);
+  _amp = ((_amp > 255) || (drive == 8)) ? 255 : _amp; // clip or when drive=8 use max output
+  amp = (tx) ? lut[_amp] : 0;
+
+  static int16_t prev_phase;
+  int16_t phase = arctan3(q, i);
+
+  int16_t dp = phase - prev_phase;  // phase difference and restriction
+  //dp = (amp) ? dp : 0;  // dp = 0 when amp = 0
+  prev_phase = phase;
+
+  if(dp < 0) dp = dp + _UA; // make negative phase shifts positive: prevents negative frequencies and will reduce spurs on other sideband
+#ifdef QUAD
+  if(dp >= (_UA/2)){ dp = dp - _UA/2; quad = !quad; }
+#endif
+
+#ifdef MAX_DP
+  if(dp > MAX_DP){ // dp should be less than half unit-angle in order to keep frequencies below F_SAMP_TX/2
+    prev_phase = phase - (dp - MAX_DP);  // substract restdp
+    dp = MAX_DP;
+  }
+#endif
+#ifdef PORT_uSDX_TO_CentSDR
+  if(mode == USDX_USB)
+#else
+  if(mode == USB)
+#endif
+    return dp * ( F_SAMP_TX / _UA); // calculate frequency-difference based on phase-difference
+  else
+    return dp * (-F_SAMP_TX / _UA);
+}
+
+#ifdef PORT_uSDX_TO_CentSDR
+static uint8_t pwm_min = 110;    // PWM value for which PA reaches its minimum: 29 when C31 installed;   0 when C31 removed;   0 for biasing BS170 directly
+static uint8_t pwm_max = 175;  // PWM value for which PA reaches its maximum: 96 when C31 installed; 255 when C31 removed;
+#else
+static uint8_t pwm_min = 0;    // PWM value for which PA reaches its minimum: 29 when C31 installed;   0 when C31 removed;   0 for biasing BS170 directly
+#ifdef QCX
+static uint8_t pwm_max = 255;  // PWM value for which PA reaches its maximum: 96 when C31 installed; 255 when C31 removed;
+#else
+static uint8_t pwm_max = 128;  // PWM value for which PA reaches its maximum:                                              128 for biasing BS170 directly
+#endif
+#endif
+
+//refresh LUT based on pwm_min, pwm_max
+void build_lut()
+{
+  for(uint16_t i = 0; i != 256; i++)    // refresh LUT based on pwm_min, pwm_max
+    lut[i] = (i * (pwm_max - pwm_min)) / 255 + pwm_min;
+    //lut[i] = min(pwm_max, (float)106*log(i) + pwm_min);  // compressed microphone output: drive=0, pwm_min=115, pwm_max=220
+}
+
+#endif
+
+
+static uint16_t s_tx_amp_ph_w_idx = 0;
+static uint16_t s_tx_amp_ph_r_idx = 0;
+
+#define SINE_WAVE_BUFFER_SIZE 360
+/*
+ * DAC test buffer (sine wave).
+ */
+static const int16_t k_sine_wave_buffer[SINE_WAVE_BUFFER_SIZE] = {
+  2047, 2082, 2118, 2154, 2189, 2225, 2260, 2296, 2331, 2367, 2402, 2437,
+  2472, 2507, 2542, 2576, 2611, 2645, 2679, 2713, 2747, 2780, 2813, 2846,
+  2879, 2912, 2944, 2976, 3008, 3039, 3070, 3101, 3131, 3161, 3191, 3221,
+  3250, 3278, 3307, 3335, 3362, 3389, 3416, 3443, 3468, 3494, 3519, 3544,
+  3568, 3591, 3615, 3637, 3660, 3681, 3703, 3723, 3744, 3763, 3782, 3801,
+  3819, 3837, 3854, 3870, 3886, 3902, 3917, 3931, 3944, 3958, 3970, 3982,
+  3993, 4004, 4014, 4024, 4033, 4041, 4049, 4056, 4062, 4068, 4074, 4078,
+  4082, 4086, 4089, 4091, 4092, 4093, 4094, 4093, 4092, 4091, 4089, 4086,
+  4082, 4078, 4074, 4068, 4062, 4056, 4049, 4041, 4033, 4024, 4014, 4004,
+  3993, 3982, 3970, 3958, 3944, 3931, 3917, 3902, 3886, 3870, 3854, 3837,
+  3819, 3801, 3782, 3763, 3744, 3723, 3703, 3681, 3660, 3637, 3615, 3591,
+  3568, 3544, 3519, 3494, 3468, 3443, 3416, 3389, 3362, 3335, 3307, 3278,
+  3250, 3221, 3191, 3161, 3131, 3101, 3070, 3039, 3008, 2976, 2944, 2912,
+  2879, 2846, 2813, 2780, 2747, 2713, 2679, 2645, 2611, 2576, 2542, 2507,
+  2472, 2437, 2402, 2367, 2331, 2296, 2260, 2225, 2189, 2154, 2118, 2082,
+  2047, 2012, 1976, 1940, 1905, 1869, 1834, 1798, 1763, 1727, 1692, 1657,
+  1622, 1587, 1552, 1518, 1483, 1449, 1415, 1381, 1347, 1314, 1281, 1248,
+  1215, 1182, 1150, 1118, 1086, 1055, 1024,  993,  963,  933,  903,  873,
+   844,  816,  787,  759,  732,  705,  678,  651,  626,  600,  575,  550,
+   526,  503,  479,  457,  434,  413,  391,  371,  350,  331,  312,  293,
+   275,  257,  240,  224,  208,  192,  177,  163,  150,  136,  124,  112,
+   101,   90,   80,   70,   61,   53,   45,   38,   32,   26,   20,   16,
+    12,    8,    5,    3,    2,    1,    0,    1,    2,    3,    5,    8,
+    12,   16,   20,   26,   32,   38,   45,   53,   61,   70,   80,   90,
+   101,  112,  124,  136,  150,  163,  177,  192,  208,  224,  240,  257,
+   275,  293,  312,  331,  350,  371,  391,  413,  434,  457,  479,  503,
+   526,  550,  575,  600,  626,  651,  678,  705,  732,  759,  787,  816,
+   844,  873,  903,  933,  963,  993, 1024, 1055, 1086, 1118, 1150, 1182,
+  1215, 1248, 1281, 1314, 1347, 1381, 1415, 1449, 1483, 1518, 1552, 1587,
+  1622, 1657, 1692, 1727, 1763, 1798, 1834, 1869, 1905, 1940, 1976, 2012
+};
+
+static uint16_t _sine_wave_delta = 6720; //6720:700Hz   360 / (4800 / freq) = 360 * freq / 4800, 7.5(100Hz) ~ 157.5(2100Hz), <<7 = 960 ~ 20160
+
+static void _lowpass_1900hz_1(int16_t *in, int16_t *out, size_t n)
+{
+  static int16_t x1, x2, y1, y2;
+  int16_t x0;
+  int32_t accum;
+  n /= 2;
+  while (n--) {
+    in++;
+    x0 = *in++;
+    accum  = (int32_t)x0 * 185;   // b0
+    accum += (int32_t)x1 * 370;   // b1
+    accum += (int32_t)x2 * 185;   // b2
+    x2 = x1;
+    x1 = x0;
+    accum += (int32_t)y1 * 25875;   // a1
+    accum += (int32_t)y2 * -10313;  // a2
+    y2 = y1;
+    y1 = accum >> 14;
+    *out++ = y1;
+    *out++ = y1;
+  }
+}
+
+static void _lowpass_1900hz_2(int16_t *in, int16_t *out, size_t n)
+{
+  static int16_t x1, x2, y1, y2;
+  int16_t x0;
+  int32_t accum;
+  n /= 2;
+  while (n--) {
+    in++;
+    x0 = *in++;
+    accum  = (int32_t)x0 * 128;
+    accum += (int32_t)x1 * 256;
+    accum += (int32_t)x2 * 128;
+    x2 = x1;
+    x1 = x0;
+    accum += (int32_t)y1 * 29026;
+    accum += (int32_t)y2 * -13563;
+    y2 = y1;
+    y1 = accum >> 14;
+    *out++ = y1;
+    *out++ = y1;
+  }
+}
+
+static void usdx_tx_test(int16_t *rx_data, size_t n)
+{
+  // data format: | L-ch | R-ch | L-ch | ... |
+  // R-ch is from Mic Input
+
+  static uint8_t cnt10 = 0;
+  static int32_t sum10 = 0;
+  static int16_t ave10 = 0;
+
+  uint16_t prev_w_idx = s_tx_amp_ph_w_idx;
+
+  int16_t *p = rx_data;
+  for (int i = 0; i < n; i += 2) {
+    sum10 += p[1];
+    if (++cnt10 >= 10) {
+      cnt10 = 0;
+      ave10 = sum10 / 10;
+      sum10 = 0;
+
+      ave10 = p[1];   // no averaging
+
+      // int16_t in = ave10 >> 6;  // /= 64, in: -512 ~ +511
+      int16_t in = ave10 >> 3;
+      if (in < -512) in = -512;
+      if (in > 511) in = 511;
+
+#if 0   //KZT for testing with sine wave
+      static uint16_t _sine_wave_index = 0;
+      in = (k_sine_wave_buffer[(_sine_wave_index >> 7)] - 2047) >> 2; // -511 ~ +511
+      // in >>= 1; // -255 ~ +255
+      _sine_wave_index += _sine_wave_delta;
+      if ((_sine_wave_index >> 7) >= SINE_WAVE_BUFFER_SIZE)
+        _sine_wave_index -= SINE_WAVE_BUFFER_SIZE << 7;
+      // static uint8_t _delta2 = 0;
+      // if (++_delta2 >= 4) {
+      //   _delta2 = 0;
+      //   _sine_wave_delta++;
+      //   if (_sine_wave_delta > 20160)
+      //     _sine_wave_delta = 960;
+      // }
+#endif
+
+      tx_amp_ph[s_tx_amp_ph_w_idx][1] = ssb(in);
+
+      tx_amp_ph[s_tx_amp_ph_w_idx][0] = amp;
+      //tx_amp_ph[s_tx_amp_ph_w_idx][0] = 255;    // always 100% amp
+
+      if (++s_tx_amp_ph_w_idx >= (AUDIO_BUFFER_LEN / 10))
+        s_tx_amp_ph_w_idx = 0;
+    }
+
+    //p[0] = p[1] = ave10;
+    p += 2;
+  }
+
+  s_tx_amp_ph_r_idx = prev_w_idx;
+}
+
+#endif
+
 void i2s_end_callback(I2SDriver *i2sp, size_t offset, size_t n)
 {
   int32_t cnt_s = port_rt_get_counter_value();
@@ -273,6 +725,14 @@ void i2s_end_callback(I2SDriver *i2sp, size_t offset, size_t n)
   int16_t *q = &tx_buffer[offset];
   (void)i2sp;
   palSetPad(GPIOC, GPIOC_LED);
+
+#ifdef PORT_uSDX_TO_CentSDR
+  if (tx) {
+    _lowpass_1900hz_1(p, q, n);
+    _lowpass_1900hz_2(q, p, n);
+    usdx_tx_test(p, n);
+  }
+#endif
 
   (*signal_process)(p, q, n);
 
@@ -1008,12 +1468,31 @@ static void _sample_portb10_11(BaseSequentialStream *chp)
   }
 }
 
+#ifdef PORT_uSDX_TO_CentSDR
+static int16_t _amp_test_level = -1;
+#endif
+
 static void cmd_test(BaseSequentialStream *chp, int argc, char *argv[])
 {
   (void)argc;
   (void)argv;
 
-  _sample_portb10_11(chp);
+  // _sample_portb10_11(chp);
+
+#ifdef PORT_uSDX_TO_CentSDR
+  // static uint8_t selected_in = 0;
+  // if (++selected_in & 1)
+  //   tlv320aic3204_select_in1();
+  // else
+  //   tlv320aic3204_select_in3();
+
+  _amp_test_level = atoi(argv[0]);
+
+  //_sine_wave_delta = (uint16_t)(((uint32_t)atoi(argv[0]) * 360 / 4800) << 7);
+  //  interesting findings:
+  //  - sudden frequency jump between 1093Hz and 1094Hz
+  //  - strong harmonic starts 2094Hz (2093Hz is fine)
+#endif
 }
 
 static void cmd_audio_codec_read_register(BaseSequentialStream *chp, int argc, char *argv[])
@@ -1047,6 +1526,29 @@ static void cmd_audio_codec_write_register(BaseSequentialStream *chp, int argc, 
   chprintf(chp, "after: %02X\r\n", r);
 }
 
+#ifdef PORT_uSDX_TO_CentSDR
+
+static void cmd_toggle_tx_rx(BaseSequentialStream *chp, int argc, char *argv[])
+{
+  bool next_tx = !tx;
+  if (next_tx) {
+    tlv320aic3204_select_in1();
+    chThdSleepMilliseconds(50);
+  }
+
+  tx = next_tx;
+  chThdSleepMilliseconds(50);
+
+  if (!tx) {
+    PWMD3.tim->CCR[2] = PWM_PERCENTAGE_TO_WIDTH(&PWMD3, 0); // turn off PWM
+    si5351_set_frequency(center_frequency);                 // back to receive frequency
+    tlv320aic3204_select_in3();
+  }
+  chprintf(chp, "switched to: %s\r\n", tx ? "TX" : "RX");
+}
+
+#endif
+
 static const ShellCommand commands[] =
 {
     { "reset", cmd_reset },
@@ -1070,6 +1572,7 @@ static const ShellCommand commands[] =
     { "show", cmd_show },
     { "power", cmd_power },
     { "channel", cmd_channel },
+    { "ch", cmd_channel },
     { "revision", cmd_revision },
     { "save", cmd_save },
     { "clearconfig", cmd_clearconfig },
@@ -1080,6 +1583,9 @@ static const ShellCommand commands[] =
     { "copych", cmd_copy_channels },
     { "acr", cmd_audio_codec_read_register },
     { "acw", cmd_audio_codec_write_register },
+#ifdef PORT_uSDX_TO_CentSDR
+    { "tx", cmd_toggle_tx_rx },
+#endif
     { NULL, NULL }
 };
 
@@ -1095,6 +1601,9 @@ static __attribute__((noreturn)) THD_FUNCTION(Thread2, arg)
       chThdSleepMilliseconds(10);
       stat.fps_count++;
 
+#ifdef PORT_uSDX_TO_CentSDR
+      if (!tx)
+#endif
       {
         int flag = tlv320aic3204_get_sticky_flag_register();
         if (flag & AIC3204_STICKY_ADC_OVERFLOW)
@@ -1118,6 +1627,41 @@ static const ShellConfig shell_cfg1 =
     (BaseSequentialStream *)&SDU1,
     commands
 };
+
+#ifdef PORT_uSDX_TO_CentSDR
+
+static inline void set_tx_freq_delta(int delta)
+{
+  si5351_set_frequency(center_frequency + delta);
+  // PWMD3.tim->CCR[2] = PWM_PERCENTAGE_TO_WIDTH(&PWMD3, ((uint32_t)delta * 10000 + 128) / 4800);   // test: observe the freq changes as PWM width
+}
+
+static inline void set_tx_amplitude(uint8_t amp)
+{
+  //pwmEnableChannel(&PWMD3, 2, PWM_PERCENTAGE_TO_WIDTH(&PWMD3, ((uint32_t)amp * 10000 + 128) / 256));  // 0 ~ 9961   // this causes the thread hung!!
+  PWMD3.tim->CCR[2] = PWM_PERCENTAGE_TO_WIDTH(&PWMD3, ((uint32_t)amp * 10000 + 128) / 256);
+  // PWMD3.tim->CCR[2] = PWM_PERCENTAGE_TO_WIDTH(&PWMD3, 10000);   // test: always 100%
+}
+
+static void gpt6_callback(GPTDriver *gptp)
+{
+  (void)gptp;
+
+  if (tx) {
+    int16_t amp = tx_amp_ph[s_tx_amp_ph_r_idx][0];   // amp: 0 ~ 255
+    int16_t phase = tx_amp_ph[s_tx_amp_ph_r_idx][1]; // phase: 0 ~ 2400Hz
+    if (++s_tx_amp_ph_r_idx >= (AUDIO_BUFFER_LEN / 10))
+      s_tx_amp_ph_r_idx = 0;
+
+    if (_amp_test_level >= 0 && _amp_test_level <= 255)
+      amp = _amp_test_level;
+
+    set_tx_freq_delta(phase);
+    set_tx_amplitude((uint8_t)amp);
+  }
+}
+
+#endif
 
 
 /*
@@ -1236,6 +1780,42 @@ int __attribute__((noreturn)) main(void)
    * Creates the button thread.
    */
   chThdCreateStatic(waThread2, sizeof(waThread2), NORMALPRIO, Thread2, NULL);
+
+#ifdef PORT_uSDX_TO_CentSDR
+  static PWMConfig pwmcfg = {
+    36000000,                               /* (STM32_HCLK / 2) = 36MHz PWM clock frequency */
+    459,                                    /* Initial PWM period 78.431KHz */
+    NULL,
+    {
+    {PWM_OUTPUT_DISABLED, NULL},
+    {PWM_OUTPUT_DISABLED, NULL},
+    {PWM_OUTPUT_ACTIVE_LOW, NULL},          // you can change to PWM_OUTPUT_ACTIVE_HIGH to flip the logic of PWM signal
+    {PWM_OUTPUT_DISABLED, NULL},
+    {PWM_OUTPUT_DISABLED, NULL},
+    {PWM_OUTPUT_DISABLED, NULL}
+    },
+    0,
+    0
+  };
+  palSetPadMode(GPIOB, 0, PAL_MODE_ALTERNATE(2));
+  pwmStart(&PWMD3, &pwmcfg);
+  pwmEnableChannel(&PWMD3, 2, PWM_PERCENTAGE_TO_WIDTH(&PWMD3, 0));   // initial duty cycle between 0 (0%) to 10000 (100%)
+
+  /*
+  * GPT6 configuration.
+  */
+  static const GPTConfig gpt6cfg1 = {
+    .frequency    = 9600U,
+    .callback     = gpt6_callback,
+    .cr2          = TIM_CR2_MMS_1,    /* MMS = 010 = TRGO on Update Event.    */
+    .dier         = 0U
+  };
+  gptStart(&GPTD6, &gpt6cfg1);
+  gptStartContinuous(&GPTD6, 2U);   // 9600 / 2 = 4800Hz
+
+  build_lut();
+#endif
+
 
   /*
    * Normal main() thread activity, spawning shells.

@@ -17,6 +17,8 @@
 #ifndef MCUCONF_H
 #define MCUCONF_H
 
+#include "nanosdr.h"
+
 /*
  * STM32F3xx drivers configuration.
  * The following settings override the default settings present in
@@ -130,14 +132,22 @@
 #define STM32_GPT_USE_TIM2                  FALSE
 #define STM32_GPT_USE_TIM3                  FALSE
 #define STM32_GPT_USE_TIM4                  FALSE
+#ifdef PORT_uSDX_TO_CentSDR
+#define STM32_GPT_USE_TIM6                  TRUE
+#else
 #define STM32_GPT_USE_TIM6                  FALSE
+#endif
 #define STM32_GPT_USE_TIM7                  FALSE
 #define STM32_GPT_USE_TIM8                  FALSE
 #define STM32_GPT_TIM1_IRQ_PRIORITY         7
 #define STM32_GPT_TIM2_IRQ_PRIORITY         7
 #define STM32_GPT_TIM3_IRQ_PRIORITY         7
 #define STM32_GPT_TIM4_IRQ_PRIORITY         7
+#ifdef PORT_uSDX_TO_CentSDR
+#define STM32_GPT_TIM6_IRQ_PRIORITY         2
+#else
 #define STM32_GPT_TIM6_IRQ_PRIORITY         7
+#endif
 #define STM32_GPT_TIM7_IRQ_PRIORITY         7
 #define STM32_GPT_TIM8_IRQ_PRIORITY         7
 
@@ -165,7 +175,11 @@
                                              STM32_I2S_MODE_TX |           \
                                              STM32_I2S_MODE_FULLDUPLEX)
 #define STM32_I2S_SPI1_IRQ_PRIORITY         2
+#ifdef PORT_uSDX_TO_CentSDR
+#define STM32_I2S_SPI2_IRQ_PRIORITY         3
+#else
 #define STM32_I2S_SPI2_IRQ_PRIORITY         2
+#endif
 #define STM32_I2S_SPI1_DMA_PRIORITY         1
 #define STM32_I2S_SPI2_DMA_PRIORITY         1
 #define STM32_I2S_SPI1_RX_DMA_STREAM        STM32_DMA_STREAM_ID(1, 2)
@@ -194,7 +208,11 @@
 #define STM32_PWM_USE_ADVANCED              FALSE
 #define STM32_PWM_USE_TIM1                  FALSE
 #define STM32_PWM_USE_TIM2                  FALSE
+#ifdef PORT_uSDX_TO_CentSDR
+#define STM32_PWM_USE_TIM3                  TRUE
+#else
 #define STM32_PWM_USE_TIM3                  FALSE
+#endif
 #define STM32_PWM_USE_TIM4                  FALSE
 #define STM32_PWM_USE_TIM8                  FALSE
 #define STM32_PWM_TIM1_IRQ_PRIORITY         7

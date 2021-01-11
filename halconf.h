@@ -69,7 +69,11 @@
  * @brief   Enables the GPT subsystem.
  */
 #if !defined(HAL_USE_GPT) || defined(__DOXYGEN__)
+#ifdef PORT_uSDX_TO_CentSDR
+#define HAL_USE_GPT                 TRUE
+#else
 #define HAL_USE_GPT                 FALSE
+#endif 
 #endif
 
 /**
@@ -111,7 +115,11 @@
  * @brief   Enables the PWM subsystem.
  */
 #if !defined(HAL_USE_PWM) || defined(__DOXYGEN__)
+#ifdef PORT_uSDX_TO_CentSDR
+#define HAL_USE_PWM                 TRUE
+#else
 #define HAL_USE_PWM                 FALSE
+#endif 
 #endif
 
 /**
