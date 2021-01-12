@@ -507,7 +507,7 @@ inline int16_t ssb(int16_t in)
 #else
   uint16_t ac = (in - dc);   // DC decoupling
 #endif
-#ifdef PORT_uSDX_TO_CentSDRCENTSDR
+#ifdef PORT_uSDX_TO_CentSDR
   v[15] = in;                // without DC decoupling
 #else
   v[15] = ac;// - z1;        // high-pass (emphasis) filter
