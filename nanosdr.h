@@ -24,6 +24,7 @@
 /*
   If you want to generate the quadrature LO directly from Si5351A without U2 (74LVC74APW),
   enable the below SI5351_GEN_QUADRATURE_LO macro switch.
+
   In that case you need to remove the U2 then populate the R5 and R6 with 0ohm resistor (jumper).
   Si5351A only be able to generate the quadrature LO down to 3.5MHz, so below that frequency 
   no phase shift between I and Q LO, meaning the CW, USB and LSB mode will not work properly.
@@ -55,8 +56,10 @@
 /*
   If you want to try the SSB TX portion of the uSDX (https://groups.io/g/ucx) (originally QCX-SSB https://github.com/threeme3/QCX-SSB)
   on CentSDR, enable the macro switch below.
+
   Current TX implementation only supports 40m band (7.000MHz ~ 7.250MHz).
-  There is no PTT switch, so you need to use the "tx" CLI command to toggle between RX and TX.
+  S3 (PA1 Pin11 of STM32F303 or T-IRQ on LCD connector) is a PTT control line, LOW (open, internally pull-down) is for RX mode 
+  and put it to HIGH (3.3V VDD) for TX.
 
   You need to have the uSDX PA circuit (EER Class-E PWM based SSB modulator) and connected to CentSDR:
   - PWM signal (active low) for Amplitude portion of SSB: S4 (PB0 Pin18 of STM32F303 or T_CS on LCD connector)
@@ -65,8 +68,14 @@
   (e.g. use a NAND gate in 74ACT00)
   Warning: the Amplitude PWM signal is in ACTIVE LOW, so you have to negate the logic before put in the RC low pass filter
 
-  If you just want to hear the Phase portion of the SSB signal, you can connect short wire at the AUXLO thru hole as antenna
-  then listen on 40m LSB (e.g. 7.200MHz) with HF rig.
+  To make it complete transceiver, you also need to add RF switch (FET) to connect / disconnect the CentSDR to antenna.
+  You can use the PTT control line, but it is in active HIGH so you need to negate the logic before put in the gate of the
+  FET.
+
+  For the PA and RF-RX switch circuit, please refer to https://github.com/threeme3/QCX-SSB/blob/master/ucx.png
+
+  If you just want to hear the Phase portion of the SSB signal without constructing the uSDX PA, you can connect a short wire 
+  at the AUXLO thru hole as antenna then listen on 40m LSB (e.g. 7.200MHz) with HF rig.
  */
 //#define PORT_uSDX_TO_CentSDR          1
 

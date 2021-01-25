@@ -408,8 +408,8 @@ inline int16_t ssb(int16_t in)
 }
 
 #ifdef PORT_uSDX_TO_CentSDR
-static uint8_t pwm_min = 110;    // PWM value for which PA reaches its minimum: 29 when C31 installed;   0 when C31 removed;   0 for biasing BS170 directly
-static uint8_t pwm_max = 175;  // PWM value for which PA reaches its maximum: 96 when C31 installed; 255 when C31 removed; 220 for biasing BS170 directly
+static uint8_t pwm_min = 0;    // PWM value for which PA reaches its minimum: 29 when C31 installed;   0 when C31 removed;   0 for biasing BS170 directly
+static uint8_t pwm_max = 70;  // PWM value for which PA reaches its maximum: 96 when C31 installed; 255 when C31 removed; 220 for biasing BS170 directly
 #else
 static uint8_t pwm_min = 0;    // PWM value for which PA reaches its minimum: 29 when C31 installed;   0 when C31 removed;   0 for biasing BS170 directly
 static uint8_t pwm_max = 220;  // PWM value for which PA reaches its maximum: 96 when C31 installed; 255 when C31 removed; 220 for biasing BS170 directly
@@ -1540,9 +1540,8 @@ static void cmd_audio_codec_write_register(BaseSequentialStream *chp, int argc, 
 
 #ifdef PORT_uSDX_TO_CentSDR
 
-static void cmd_toggle_tx_rx(BaseSequentialStream *chp, int argc, char *argv[])
+static void _set_tx_rx(bool next_tx)
 {
-  bool next_tx = !tx;
   if (next_tx) {
     tlv320aic3204_select_in1();
     chThdSleepMilliseconds(50);
@@ -1556,7 +1555,6 @@ static void cmd_toggle_tx_rx(BaseSequentialStream *chp, int argc, char *argv[])
     si5351_set_frequency(center_frequency);                 // back to receive frequency
     tlv320aic3204_select_in3();
   }
-  chprintf(chp, "switched to: %s\r\n", tx ? "TX" : "RX");
 }
 
 #endif
@@ -1595,9 +1593,6 @@ static const ShellCommand commands[] =
     { "copych", cmd_copy_channels },
     { "acr", cmd_audio_codec_read_register },
     { "acw", cmd_audio_codec_write_register },
-#ifdef PORT_uSDX_TO_CentSDR
-    { "tx", cmd_toggle_tx_rx },
-#endif
     { NULL, NULL }
 };
 
@@ -1614,6 +1609,12 @@ static __attribute__((noreturn)) THD_FUNCTION(Thread2, arg)
       stat.fps_count++;
 
 #ifdef PORT_uSDX_TO_CentSDR
+      // read PTT
+      bool next_tx = (palReadLine(PAL_LINE(GPIOA, 1U)) == 0) ? false : true;
+      if (next_tx != tx) {
+        _set_tx_rx(next_tx);
+      }
+
       if (!tx)
 #endif
       {
@@ -1671,6 +1672,9 @@ static void gpt6_callback(GPTDriver *gptp)
     set_tx_freq_delta(phase);
     set_tx_amplitude((uint8_t)amp);
   }
+  else {
+    set_tx_amplitude(0);
+  }
 }
 
 #endif
@@ -1690,6 +1694,11 @@ int __attribute__((noreturn)) main(void)
    */
   halInit();
   chSysInit();
+
+#ifdef PORT_uSDX_TO_CentSDR
+  // pull-down the TX signal as soon as possible to avoid any unintentional TX
+  palSetPadMode(GPIOA, 1, PAL_MODE_INPUT_PULLDOWN);
+#endif
 
   /* restore config */
   config_recall();
